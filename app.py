@@ -8,6 +8,9 @@ Hesaplama ve STL üretim işlevleri cozum.py dosyasındadır.
 import io
 import re
 import zipfile
+import json
+from google import genai
+from google.genai import types
 
 import numpy as np
 import plotly.graph_objects as go
