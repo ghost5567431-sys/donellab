@@ -4,3 +4,4 @@ plotly
 sympy
 Pillow
 pytesseract
+google-genai
