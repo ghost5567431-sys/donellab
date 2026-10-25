@@ -17,12 +17,7 @@ import sympy as sp
 import cozum as c
 
 
-st.set_page_config(page_title="Dönel Cisim Hacmi → STL", layout="centered")
-st.markdown("""<style>
-.block-container {padding-top: 1.2rem; padding-bottom: 2rem; max-width: 1100px;}
-[data-testid="stMetricValue"] {font-size: 1.35rem;}
-@media (max-width: 600px) { .block-container {padding-left: 0.8rem; padding-right: 0.8rem;} h1 {font-size: 1.65rem !important;} }
-</style>""", unsafe_allow_html=True)
+st.set_page_config(page_title="Dönel Cisim Hacmi → STL", layout="wide")
 st.title("Dönel Cisim Hacmi → Sembolik Hesap + 3B Baskı (STL)")
 st.caption("V = π∫ f(x)² dx — değerleri girin, sonuç anında görünür.")
 
@@ -40,92 +35,139 @@ for anahtar, ilk in {
 
 # Metin alanı başlangıç değeri. Dosya yükleyicisinin anahtarını Streamlit yönetir.
 st.session_state.setdefault("soru_metni", "")
-st.session_state.setdefault("ocr_okunan", "")
 
 
 # ---------------------------------------------------------------------------
 # CLAUDE / HARİCİ API GEREKTİRMEYEN YEREL SORU OKUMA
 # ---------------------------------------------------------------------------
 def metinden_soruyu_ayikla(metin):
-    """Desteklenen metin biçimlerinden f(x), a ve b değerlerini çıkarır.
+    """Uzun soru metninden f(x), a, b değerlerini API kullanmadan ayıklar.
 
-    Örnekler:
-      f(x)=x^2+1, a=0, b=2
-      integral 0 ile 2 arasında: x^2+1
-      ∫_0^2 (x^2+1) dx
+    Bu bir sezgisel ayrıştırıcıdır; serbest biçimli tüm matematik sorularını
+    çözmez. Tanınmayan veya belirsiz durumlarda kullanıcıdan kontrol ister.
     """
-    metin = (metin or "").replace("\n", " ").replace("\r", " ").strip()
-    metin = metin.replace("−", "-").replace("–", "-").replace("×", "*").replace("·", "*").replace("²", "^2").replace("³", "^3")
+    metin = (metin or "").strip()
+    # OCR'da sık görülen karakterleri normalleştir.
+    metin = (metin.replace("−", "-").replace("–", "-").replace("×", "*")
+             .replace("·", "*").replace("²", "^2").replace("³", "^3")
+             .replace("π", "pi").replace("\\", " "))
     metin = re.sub(r"\s+", " ", metin)
     if not metin:
-        raise ValueError("Soruyu yazın veya soldaki f(x), a ve b alanlarını elle doldurun.")
+        raise ValueError("Önce soru fotoğrafı yükleyin veya soru metnini yazın.")
 
-    # En güvenilir ve açık biçim: f(x)=..., a=..., b=...
-    mf = re.search(r"f\s*\(\s*x\s*\)\s*=\s*(.+?)(?=\s*[,;]?\s*(?:a|alt sınır)\s*=|$)", metin, re.I)
-    ma = re.search(r"(?:\ba\b|alt\s*sınır)\s*=\s*([^,;\s]+)", metin, re.I)
-    mb = re.search(r"(?:\bb\b|üst\s*sınır)\s*=\s*([^,;\s]+)", metin, re.I)
-    if mf and ma and mb:
-        return mf.group(1).strip().strip("() "), ma.group(1), mb.group(1)
+    # Fonksiyonu hem f(x)=... hem de 'fonksiyonu ... olan' biçiminde bul.
+    fonksiyon = None
+    mf = re.search(r"(?:f\s*\(\s*x\s*\)|y)\s*=\s*(.+?)(?=(?:[,;.]?\s*(?:a\s*=|b\s*=|x\s*=|a\s*\u003d|alt sınır|üst sınır))|$)", metin, re.I)
+    if mf:
+        fonksiyon = mf.group(1).strip(" ,;:.()[]")
 
-    # Yaygın matematik yazımı: ∫_0^2 (x^2+1) dx
+    # f(x)=... ile x=0 ve x=2 sınırlarının yazıldığı uzun problem metni.
+    # Açık a/b tanımları varsa öncelik onlarda.
+    ma = re.search(r"(?:alt\s*sınır|başlangıç\s*noktası|a)\s*(?:=|:|\s)\s*(-?\d+(?:[.,]\d+)?|pi)", metin, re.I)
+    mb = re.search(r"(?:üst\s*sınır|bitiş\s*noktası|b)\s*(?:=|:|\s)\s*(-?\d+(?:[.,]\d+)?|pi)", metin, re.I)
+    a = ma.group(1).replace(",", ".") if ma else None
+    b = mb.group(1).replace(",", ".") if mb else None
+
+    # 'x=0 ve x=2 doğruları arasında', 'x=0 ile x=2 arasında'.
+    xs = re.findall(r"x\s*=\s*(-?\d+(?:[.,]\d+)?|pi)", metin, re.I)
+    if len(xs) >= 2:
+        a = a or xs[0].replace(",", ".")
+        b = b or xs[1].replace(",", ".")
+
+    # '0 ile 2 arasında', '0'dan 2'ye kadar' gibi doğal dil sınırları.
+    if a is None or b is None:
+        sinir = re.search(
+            r"(-?\d+(?:[.,]\d+)?|pi)\s*(?:ile|[-–]|'dan|'den|'tan|'ten)\s*"
+            r"(-?\d+(?:[.,]\d+)?|pi)\s*(?:arasında|arasındaki|aralığında|araligi|ye kadar|a kadar)?",
+            metin, re.I)
+        if sinir:
+            a = a or sinir.group(1).replace(",", ".")
+            b = b or sinir.group(2).replace(",", ".")
+
+    # 'integral 0 ile 2 arasında: x^2+1' veya ∫_0^2 (x^2+1) dx.
     integral = re.search(r"∫\s*_\s*\{?(-?\d+(?:\.\d+)?|pi)\}?\s*\^\s*\{?(-?\d+(?:\.\d+)?|pi)\}?\s*(?:\((.*?)\)|(.*?))\s*d\s*x", metin, re.I)
     if integral:
-        f = integral.group(3) if integral.group(3) is not None else integral.group(4)
-        return f.strip().strip("() "), integral.group(1), integral.group(2)
+        f_int = integral.group(3) if integral.group(3) is not None else integral.group(4)
+        return f_int.strip().strip("() "), integral.group(1), integral.group(2)
 
-    # Basit doğal dil kalıbı: "0 ile 2 arasında: x^2+1"
-    sinir = re.search(r"(-?\d+(?:\.\d+)?)\s*ile\s*(-?\d+(?:\.\d+)?)\s*arasında\s*:?\s*(.+)", metin, re.I)
-    if sinir:
-        return sinir.group(3).strip().strip("() "), sinir.group(1), sinir.group(2)
+    # '0 ile 2 arasında: x^2+1' ifadesinde fonksiyon sınırdan sonra gelebilir.
+    if fonksiyon is None:
+        mf2 = re.search(r"(?:arasında|aralığında|araligi)\s*[:,]?\s*(?:f\s*\(\s*x\s*\)\s*=\s*)?(.+?)(?:\s+(?:eğrisi|fonksiyonu|grafiği|ile sınırlı|etrafında döndürülür|etrafında döndürülüyor|hacmini|hacmi bulun|hesaplayın|bulunuz).*)?$", metin, re.I)
+        if mf2:
+            aday = mf2.group(1).strip(" ,;:.()[]")
+            if re.search(r"\bx\b", aday, re.I) and not re.search(r"\b(?:bulun|hesapla|döndür|arasında)\b", aday, re.I):
+                fonksiyon = aday
 
-    raise ValueError("Soruyu anlayamadım. Şu biçimde yazın: f(x)=x^2+1, a=0, b=2")
+    # 'f(x)=...' sonrası metin bazen OCR ile sınırları içerebilir; gereksiz dili temizle.
+    if fonksiyon:
+        fonksiyon = re.sub(r"\s+(?:eğrisi|fonksiyonu|grafiği|ile sınırlı.*|x ekseni.*|etrafında.*|oluşan.*|hacmini.*|hacmi.*)$", "", fonksiyon, flags=re.I).strip(" ,;:.()[]")
+        # f(x) alanına yalnızca matematik ifadesi gitsin.
+        fonksiyon = re.sub(r"\s+ve\s+x\s*=.*$", "", fonksiyon, flags=re.I).strip()
 
+    # En açık biçim: f(x)=..., a=..., b=...
+    if fonksiyon and a is not None and b is not None:
+        return fonksiyon.replace("**", "^").strip(), a, b
+
+    # Sınırdan sonra iki nokta ile verilen fonksiyon.
+    if a is not None and b is not None:
+        sonra = re.search(r"(?:arasında|aralığında)\s*:\s*(.+?)(?:\s+(?:eğrisi|fonksiyonu|grafiği|x ekseni|etrafında|hacmini|hacmi bulun|hesaplayın).*)?$", metin, re.I)
+        if sonra:
+            aday = sonra.group(1).strip(" ,;:.()[]")
+            if re.search(r"\bx\b", aday, re.I):
+                return aday.replace("**", "^"), a, b
+
+    raise ValueError(
+        "Sorudan fonksiyon ve sınırları kesin çıkaramadım. Fotoğrafı daha net yükleyin; "
+        "uygulama f(x), a ve b alanlarını doldurmak için şu tür bilgileri arar: "
+        "f(x)=x^2+1 ve x=0, x=2. Bulunan değerleri hesaplamadan önce kontrol edin."
+    )
 
 def oku_tiklandi():
-    """Fotoğraf/kamera OCR'si veya elle yazılan metinden f(x), a, b çıkarır."""
-    gorsel = st.session_state.get("gorsel")
-    if gorsel is None:
-        gorsel = st.session_state.get("kamera_gorsel")
-
-    # Fotoğraf varsa onu öncelikli oku.
-    if gorsel is not None:
-        try:
-            import pytesseract
-            from PIL import Image, ImageEnhance, ImageOps
-
-            resim = Image.open(io.BytesIO(gorsel.getvalue())).convert("RGB")
-            resim = ImageOps.grayscale(resim)
-            resim = ImageEnhance.Contrast(resim).enhance(2.0)
-            # Küçük telefon fotoğraflarında karakterleri OCR için büyüt.
-            resim = resim.resize((resim.width * 2, resim.height * 2))
-            metin_ocr = pytesseract.image_to_string(resim, config="--oem 3 --psm 6", lang="eng")
-            st.session_state.ocr_okunan = metin_ocr.strip()
-            f, a, b = metinden_soruyu_ayikla(metin_ocr)
-            st.session_state.f_in = f.replace("**", "^")
-            st.session_state.a_in = a
-            st.session_state.b_in = b
-            st.session_state.tur = "integral"
-            st.session_state.mesaj = f"✓ Fotoğraf okundu: f(x)={f}, sınırlar [{a}, {b}]. Lütfen değerleri kontrol edin; sonra Hesapla bölümünü kontrol edin."
-        except ImportError:
-            st.session_state.mesaj = "OCR paketleri bulunamadı. GitHub deposunda requirements.txt ve packages.txt dosyalarının bulunduğundan emin olun."
-        except Exception as hata:
-            st.session_state.mesaj = f"Fotoğraftaki soru otomatik okunamadı: {hata}. Fotoğrafı daha net/kırpılmış yükleyin veya soruyu metin alanına yazın."
-        return
-
+    """Metin sorusunu internet/API olmadan yerel olarak ayrıştırır."""
     metin = st.session_state.get("soru_metni", "").strip()
+    gorsel = st.session_state.get("gorsel")
+
     if metin:
         try:
             f, a, b = metinden_soruyu_ayikla(metin)
+            # Girdi widget'ları callback sırasında güncellenebilir.
             st.session_state.f_in = f.replace("**", "^")
             st.session_state.a_in = a
             st.session_state.b_in = b
             st.session_state.tur = "integral"
-            st.session_state.mesaj = f"✓ Soru metinden ayrıştırıldı: f(x)={f}, sınırlar [{a}, {b}]. Değerleri kontrol edin."
+            st.session_state.mesaj = f"✓ Soru yerel olarak ayrıştırıldı: f(x)={f}, sınırlar [{a}, {b}]."
         except Exception as hata:
             st.session_state.mesaj = str(hata)
         return
 
-    st.session_state.mesaj = "Fotoğraf yükleyin/çekin ya da soruyu metin alanına yazın."
+    if gorsel is not None:
+        try:
+            import pytesseract
+            from PIL import Image
+            import io as _io
+            resim = Image.open(_io.BytesIO(gorsel.getvalue())).convert("RGB")
+            # Kontrastı artır; matematik sembolleri için tek blok OCR dene.
+            from PIL import ImageEnhance, ImageOps
+            gri = ImageOps.grayscale(resim)
+            gri = ImageEnhance.Contrast(gri).enhance(2.0)
+            metin_ocr = pytesseract.image_to_string(gri, config="--psm 6", lang="eng")
+            try:
+                f, a, b = metinden_soruyu_ayikla(metin_ocr)
+            except ValueError:
+                metin_ocr_satir = pytesseract.image_to_string(gri, config="--psm 11", lang="eng")
+                f, a, b = metinden_soruyu_ayikla(metin_ocr_satir)
+            st.session_state.f_in = f.replace("**", "^")
+            st.session_state.a_in = a
+            st.session_state.b_in = b
+            st.session_state.tur = "integral"
+            st.session_state.mesaj = f"✓ Görsel yerel OCR ile okundu: f(x)={f}, sınırlar [{a}, {b}]. Sonucu kontrol edin."
+        except ImportError:
+            st.session_state.mesaj = "OCR kütüphaneleri kurulu değil. requirements.txt ve packages.txt dosyalarının güncel olduğundan emin olun."
+        except Exception as hata:
+            st.session_state.mesaj = f"Görsel otomatik okunamadı: {hata}. f(x), a ve b alanlarını elle doldurabilirsiniz."
+        return
+
+    st.session_state.mesaj = "Bir soru yazın veya görsel yükleyin. Ayrıca f(x), a ve b alanlarını doğrudan doldurabilirsiniz."
 
 
 # ---------------------------------------------------------------------------
@@ -155,19 +197,17 @@ with st.sidebar:
         value=80,
     )
     st.divider()
-    st.subheader("📷 Fotoğraftan soru oku")
-    st.caption("Galeriden fotoğraf yükleyin veya telefon kamerasıyla çekin. API anahtarı gerekmez.")
+    st.subheader("📷 Sorunun tamamını oku (API gerekmez)")
     st.file_uploader(
-        "Galeriden soru fotoğrafı seç",
-        type=["png", "jpg", "jpeg", "webp"],
+        "Soru fotoğrafı",
+        type=["png", "jpg", "jpeg", "webp", "gif"],
         key="gorsel",
     )
-    st.camera_input("Veya kamerayla fotoğraf çek", key="kamera_gorsel")
     st.text_area(
         "Soruyu yazın",
         key="soru_metni",
         height=100,
-        placeholder="f(x)=x^2+1, a=0, b=2  veya  ∫_0^2 (x^2+1) dx",
+        placeholder="Örn: f(x)=x^2+1 eğrisi x=0 ve x=2 doğruları arasında...",
     )
     st.button(
         "Soruyu oku → hesapla",
@@ -175,12 +215,8 @@ with st.sidebar:
         type="primary",
     )
 
-    yuklenen = st.session_state.get("gorsel") or st.session_state.get("kamera_gorsel")
-    if yuklenen is not None:
-        st.image(yuklenen, caption="Soru fotoğrafı", use_container_width=True)
-    if st.session_state.get("ocr_okunan"):
-        with st.expander("Fotoğraftan okunan ham metni gör"):
-            st.code(st.session_state.ocr_okunan)
+    if st.session_state.get("gorsel") is not None:
+        st.image(st.session_state.gorsel, caption="Yüklenen görsel")
     if st.session_state.get("mesaj"):
         st.info(st.session_state.mesaj)
 
