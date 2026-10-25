@@ -1,4 +1,6 @@
-streamlit>=1.38,<2.0
-numpy>=1.26
-plotly>=5.20
-sympy>=1.12
+streamlit
+numpy
+plotly
+sympy
+Pillow
+pytesseract
